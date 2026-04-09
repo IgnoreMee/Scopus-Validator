@@ -1,119 +1,130 @@
 import streamlit as st
+import pandas as pd
 import json
 import os
 import time
+from io import BytesIO
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+import re
 
-# ==========================================
-# 1. THE SELENIUM BOT ENGINE
-# ==========================================
+def is_valid_issn_format(issn):
+    """Checks if the input strictly matches the 1234-5678 format."""
+    # The regex pattern for exactly 4 digits, a hyphen, and 4 digits (or X)
+    pattern = r"^\d{4}-\d{3}[\dxX]$"
+    return bool(re.match(pattern, str(issn).strip()))
+
+# --- SCRAPER ENGINE ---
 def run_scraper(issn_to_check):
-    driver = webdriver.Chrome()
-    status = "Unknown"
-    coverage_text = "N/A"
+    options = webdriver.ChromeOptions()
+    
+    # 1. Force the invisible browser to be full 1080p desktop size
+    options.add_argument("--window-size=1920,1080")
+    
+    # 2. Disguise the bot as a normal human Chrome user
+    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    
+    # 3. THE MAGIC FIX: Run silently in the background!
+    options.add_argument("--headless=new") 
+    
+    # 4. Optional but recommended: Helps prevent crashes when running invisible
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    
+    driver = webdriver.Chrome(options=options)
+    status, coverage = "Unknown", "N/A"
     
     try:
         driver.get("https://www.scopus.com/sources.uri")
         wait = WebDriverWait(driver, 10)
         
-        # --- Search Phase ---
+        # Select ISSN dropdown
         dropdown = wait.until(EC.element_to_be_clickable((By.ID, "srcResultComboDrp-button")))
         dropdown.click()
-        time.sleep(1) 
-        
-        issn_option = wait.until(EC.element_to_be_clickable((By.ID, "ui-id-4")))
-        issn_option.click() 
         time.sleep(1)
+        issn_option = wait.until(EC.element_to_be_clickable((By.ID, "ui-id-4")))
+        issn_option.click()
         
+        # Search
         search_box = wait.until(EC.element_to_be_clickable((By.ID, "search-term")))
-        search_box.clear()
         search_box.send_keys(issn_to_check)
-        
-        search_button = wait.until(EC.presence_of_element_located((By.ID, "searchTermsSubmit")))
+        search_button = driver.find_element(By.ID, "searchTermsSubmit")
         driver.execute_script("arguments[0].click();", search_button)
         
-        # --- Evaluation Phase ---
-        time.sleep(5) 
+        time.sleep(4)
         no_results = driver.find_elements(By.ID, "noresultsMessage")
-        
         if len(no_results) > 0 and no_results[0].is_displayed():
-            return "Invalid", "No sources found on Scopus."
-            
-        # --- Extraction Phase ---
-        first_journal_link = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[@id='sourceResults']//tbody/tr[1]//a")))
-        driver.execute_script("arguments[0].click();", first_journal_link)
-        
-        time.sleep(3) 
-        header_block = wait.until(EC.presence_of_element_located((By.CLASS_NAME, "wrapperNoMarginInsidePadding")))
-        full_text = header_block.text
-        
-        for line in full_text.split('\n'):
-            if "Years currently covered by Scopus" in line:
-                coverage_text = line
-                break
-                
-        # --- Logic Phase ---
-        if "to Present" in coverage_text or "to 2026" in coverage_text:
-            status = "Valid"
-        else:
-            status = "Invalid (Discontinued)"
+            return "Invalid", "No sources found"
 
-    except Exception as e:
-        status = "Error"
-        coverage_text = f"Bot crashed: {e}"
+        # Extract Details
+        link = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[@id='sourceResults']//tbody/tr[1]//a")))
+        driver.execute_script("arguments[0].click();", link)
         
+        time.sleep(3)
+        header = wait.until(EC.presence_of_element_located((By.CLASS_NAME, "wrapperNoMarginInsidePadding"))).text
+        for line in header.split('\n'):
+            if "Years currently covered by Scopus" in line:
+                coverage = line
+                break
+        
+        status = "Valid" if ("to Present" in coverage or "to 2026" in coverage) else "Invalid (Discontinued)"
+    except:
+        status = "Error/Not Found"
     finally:
         driver.quit()
-        return status, coverage_text
+        return status, coverage
 
-# ==========================================
-# 2. THE STREAMLIT FRONTEND
-# ==========================================
-st.set_page_config(page_title="Scopus Validator")
-st.title("Scopus Journal Validator")
-st.markdown("Enter a journal's details to automatically verify its active status on Scopus.")
+# --- STREAMLIT UI ---
+st.set_page_config(page_title="PICT Scopus Validator", layout="wide")
+st.title("Scopus Data Automation Tool 📊")
 
-with st.form("single_search_form"):
-    input_title = st.text_input("Journal Title (Optional)")
-    input_issn = st.text_input("ISSN Number (Required)", placeholder="e.g., 0007-9235")
-    submitted = st.form_submit_button("Search & Validate")
+tab1, tab2 = st.tabs(["Single Search", "Bulk Excel Upload"])
 
-if submitted:
-    if not input_issn:
-        st.warning("Please enter an ISSN number.")
-    else:
-        with st.spinner(f"Firing up the bot... Searching Scopus for {input_issn}..."):
-            # Trigger the bot and wait for the results!
-            final_status, final_coverage = run_scraper(input_issn)
-            
-        # Display the results on the web page
-        if "Valid" in final_status:
-            st.success(f"**Status:** {final_status}")
-        else:
-            st.error(f"**Status:** {final_status}")
-            
-        st.info(f"**Extracted Data:** {final_coverage}")
+# TAB 1: SINGLE SEARCH
+with tab1:
+    with st.form("single_form"):
+        single_issn = st.text_input("Enter ISSN (Format: 0000-0000)")
+        if st.form_submit_button("Verify"):
+            # THE EDGE CASE CHECK:
+            if not is_valid_issn_format(single_issn):
+                st.error("⚠️ Invalid format. Please enter a valid ISSN like '0007-9235'.")
+            else:
+                with st.spinner("Bot is running..."):
+                    res, cov = run_scraper(single_issn)
+                    st.write(f"**Result:** {res} | **Details:** {cov}")
 
-        # Save to JSON Database
-        new_record = {
-            "Title": input_title,
-            "ISSN": input_issn,
-            "Status": final_status,
-            "Coverage Details": final_coverage
-        }
+# TAB 2: BULK UPLOAD (New Logic)
+with tab2:
+    uploaded_file = st.file_uploader("Upload Excel File", type=["xlsx"])
+    if uploaded_file:
+        df = pd.read_excel(uploaded_file, dtype=str)
+        st.write("Preview of Uploaded Data:", df.head())
         
-        json_filename = "scopus_database.json"
-        if os.path.exists(json_filename):
-            with open(json_filename, "r") as file:
-                data = json.load(file)
-        else:
-            data = []
+        issn_column = st.selectbox("Select the column containing ISSNs", df.columns)
+        
+        if st.button("Start Bulk Process"):
+            results = []
+            progress_bar = st.progress(0)
             
-        data.append(new_record)
-        with open(json_filename, "w") as file:
-            json.dump(data, file, indent=4)
+            for index, row in df.iterrows():
+                issn = str(row[issn_column])
+                st.write(f"Checking {index+1}/{len(df)}: {issn}...")
+                
+                status, coverage = run_scraper(issn)
+                results.append({"Status": status, "Coverage": coverage})
+                
+                # Update progress
+                progress_bar.progress((index + 1) / len(df))
             
-        st.write("Result successfully saved to `scopus_database.json`!")
+            # Merge results back to dataframe
+            res_df = pd.concat([df, pd.DataFrame(results)], axis=1)
+            
+            # Download Button
+            output = BytesIO()
+            res_df.to_excel(output, index=False)
+            st.success("Bulk Processing Complete!")
+            st.download_button("Download Processed Excel", data=output.getvalue(), file_name="scopus_results.xlsx")
+
+           

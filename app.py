@@ -4,7 +4,9 @@ import json
 import os
 import time
 from io import BytesIO
+from selenium import webdriver
 import undetected_chromedriver as uc
+import shutil # <--- THIS IS THE MAGIC PATH-FINDER WE WERE MISSING!
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -12,38 +14,76 @@ import re
 
 def is_valid_issn_format(issn):
     """Checks if the input strictly matches the 1234-5678 format."""
-    # The regex pattern for exactly 4 digits, a hyphen, and 4 digits (or X)
     pattern = r"^\d{4}-\d{3}[\dxX]$"
     return bool(re.match(pattern, str(issn).strip()))
 
 # --- SCRAPER ENGINE ---
 def run_scraper(issn_to_check):
-    # Change webdriver.ChromeOptions() to uc.ChromeOptions()
+    # 1. Search for Linux paths (Will return None if on Windows)
+    browser_path = shutil.which("chromium-browser") or shutil.which("chromium")
+    driver_path = shutil.which("chromedriver")
+    
     options = uc.ChromeOptions()
     
-    # Force it to use the Linux Chromium you installed via packages.txt
-    options.binary_location = "/usr/bin/chromium"
+    # --- THE NEW FIX: Don't wait for heavy background scripts! ---
+    options.page_load_strategy = 'eager' 
     
-    options.add_argument("--headless=new") 
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
+    options.add_argument("--disable-software-rasterizer") # Helps prevent renderer crashes
     options.add_argument("--window-size=1920,1080")
     
-    # Change webdriver.Chrome to uc.Chrome
-    driver = uc.Chrome(options=options)
     status, coverage = "Unknown", "N/A"
     
     try:
+        # 2. THE ENVIRONMENT CHECK
+        if browser_path:
+            # --- CLOUD MODE ---
+            driver = uc.Chrome(
+                options=options,
+                browser_executable_path=browser_path,
+                driver_executable_path=driver_path,
+                headless=True,
+                use_subprocess=False
+            )
+        else:
+            # --- LOCAL MODE ---
+            # We are on your Windows laptop!
+            local_options = webdriver.ChromeOptions()
+            local_options.page_load_strategy = 'eager'
+            
+            # 1. THE DISGUISE: Force full HD resolution and a fake human User-Agent
+            local_options.add_argument("--window-size=1920,1080")
+            local_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+            
+            # 2. RUN INVISIBLE: Turn headless mode back on!
+            local_options.add_argument("--headless=new")
+            
+            # 3. ANTI-BOT STEALTH FLAGS
+            local_options.add_argument("--disable-blink-features=AutomationControlled")
+            local_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+            local_options.add_experimental_option('useAutomationExtension', False)
+            
+            driver = webdriver.Chrome(options=local_options)
+            
+            # 4. Final stealth trick: Delete the 'webdriver' flag inside the browser
+            driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+            
+        # Give the driver a strict timeout rule so it never hangs forever
+        driver.set_page_load_timeout(30)
+        
         driver.get("https://www.scopus.com/sources.uri")
         wait = WebDriverWait(driver, 10)
         
-        # Select ISSN dropdown
-        dropdown = wait.until(EC.element_to_be_clickable((By.ID, "srcResultComboDrp-button")))
-        dropdown.click()
+        # Select ISSN dropdown (Using JS click to bypass the cookie banner!)
+        dropdown = wait.until(EC.presence_of_element_located((By.ID, "srcResultComboDrp-button")))
+        driver.execute_script("arguments[0].click();", dropdown)
+        
         time.sleep(1)
-        issn_option = wait.until(EC.element_to_be_clickable((By.ID, "ui-id-4")))
-        issn_option.click()
+        
+        issn_option = wait.until(EC.presence_of_element_located((By.ID, "ui-id-4")))
+        driver.execute_script("arguments[0].click();", issn_option)
         
         # Search
         search_box = wait.until(EC.element_to_be_clickable((By.ID, "search-term")))
@@ -70,15 +110,15 @@ def run_scraper(issn_to_check):
         status = "Valid" if ("to Present" in coverage or "to 2026" in coverage) else "Invalid (Discontinued)"
     
     except Exception as e:
-        driver.save_screenshot("server_debug.png")
+        if 'driver' in locals():
+            driver.save_screenshot("server_debug.png")
         status = "Error"
-        # Let's actually capture the real error message!
         coverage = f"Crash Details: {str(e)}"
         
     finally:
-        driver.quit()
+        if 'driver' in locals():
+            driver.quit()
         
-    # MOVE THIS OUTSIDE AND UN-INDENT IT ONCE!
     return status, coverage
 
 # --- STREAMLIT UI ---
@@ -92,7 +132,6 @@ with tab1:
     with st.form("single_form"):
         single_issn = st.text_input("Enter ISSN (Format: 0000-0000)")
         if st.form_submit_button("Verify"):
-            # THE EDGE CASE CHECK:
             if not is_valid_issn_format(single_issn):
                 st.error("Invalid format. Please enter a valid ISSN like '0007-9235'.")
             else:
@@ -100,12 +139,11 @@ with tab1:
                     res, cov = run_scraper(single_issn)
                     st.write(f"**Result:** {res} | **Details:** {cov}")
                     
-                    # THE FIX: Display the screenshot AFTER the bot runs, if it errored!
                     if res == "Error" and os.path.exists("server_debug.png"):
                         st.warning("📸 The bot crashed. Here is what the server screen looked like at the moment of failure:")
                         st.image("server_debug.png")
 
-# TAB 2: BULK UPLOAD (New Logic)
+# TAB 2: BULK UPLOAD
 with tab2:
     uploaded_file = st.file_uploader("Upload Excel File", type=["xlsx"])
     if uploaded_file:
@@ -125,16 +163,11 @@ with tab2:
                 status, coverage = run_scraper(issn)
                 results.append({"Status": status, "Coverage": coverage})
                 
-                # Update progress
                 progress_bar.progress((index + 1) / len(df))
             
-            # Merge results back to dataframe
             res_df = pd.concat([df, pd.DataFrame(results)], axis=1)
             
-            # Download Button
             output = BytesIO()
             res_df.to_excel(output, index=False)
             st.success("Bulk Processing Complete!")
             st.download_button("Download Processed Excel", data=output.getvalue(), file_name="scopus_results.xlsx")
-
-           

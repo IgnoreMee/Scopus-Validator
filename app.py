@@ -67,15 +67,22 @@ def run_scraper(issn_to_check):
                 break
         
         status = "Valid" if ("to Present" in coverage or "to 2026" in coverage) else "Invalid (Discontinued)"
-    except:
-        status = "Error/Not Found"
+    
+    except Exception as e:
+        driver.save_screenshot("server_debug.png")
+        status = "Error"
+        # Let's actually capture the real error message!
+        coverage = f"Crash Details: {str(e)}"
+        
     finally:
         driver.quit()
-        return status, coverage
+        
+    # MOVE THIS OUTSIDE AND UN-INDENT IT ONCE!
+    return status, coverage
 
 # --- STREAMLIT UI ---
 st.set_page_config(page_title="PICT Scopus Validator", layout="wide")
-st.title("Scopus Data Automation Tool 📊")
+st.title("Scopus Data Automation Tool")
 
 tab1, tab2 = st.tabs(["Single Search", "Bulk Excel Upload"])
 
@@ -86,11 +93,16 @@ with tab1:
         if st.form_submit_button("Verify"):
             # THE EDGE CASE CHECK:
             if not is_valid_issn_format(single_issn):
-                st.error("⚠️ Invalid format. Please enter a valid ISSN like '0007-9235'.")
+                st.error("Invalid format. Please enter a valid ISSN like '0007-9235'.")
             else:
                 with st.spinner("Bot is running..."):
                     res, cov = run_scraper(single_issn)
                     st.write(f"**Result:** {res} | **Details:** {cov}")
+                    
+                    # THE FIX: Display the screenshot AFTER the bot runs, if it errored!
+                    if res == "Error" and os.path.exists("server_debug.png"):
+                        st.warning("📸 The bot crashed. Here is what the server screen looked like at the moment of failure:")
+                        st.image("server_debug.png")
 
 # TAB 2: BULK UPLOAD (New Logic)
 with tab2:

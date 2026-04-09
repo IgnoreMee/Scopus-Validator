@@ -18,7 +18,7 @@ def is_valid_issn_format(issn):
 
 # --- SCRAPER ENGINE ---
 def run_scraper(issn_to_check):
-   options = webdriver.ChromeOptions()
+    options = webdriver.ChromeOptions()
     
     # Must be headless on a server
     options.add_argument("--headless=new") 
